@@ -1,0 +1,9 @@
+streamlit
+openai
+python-dotenv
+watchdog
+PyPDF2
+python-docx
+python-pptx
+matplotlib
+pandas
