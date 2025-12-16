@@ -31,6 +31,7 @@ st.write("""
 <span style='font-size:18px;'>Enter the details below to generate account insights for your sales opportunity.</span>
 """, unsafe_allow_html=True)
 
+
 # Input fields
 product_name = st.text_input("Product Name", help="What product are you selling?")
 company_url = st.text_input("Company URL", help="URL of the company you are targeting")
@@ -38,8 +39,23 @@ product_category = st.text_input("Product Category", help="E.g., Data Warehousin
 competitors = st.text_area("Competitors (URLs)", help="Enter one URL per line")
 value_proposition = st.text_input("Value Proposition", help="Summarize the product's value in one sentence")
 target_customer = st.text_input("Target Customer", help="Name of the person you are trying to sell to")
-
+manual_leaders = st.text_area("Known Company Leaders (optional, one per line)", help="Enter names of key leaders at the prospect company")
 uploaded_file = st.file_uploader("Optional: Upload a product overview sheet or deck", type=["pdf", "docx", "pptx", "txt"])
+
+# Customizable output template: section selection
+st.markdown("**Select which sections to include in the one-pager:**")
+section_options = {
+    "Company Strategy": "company_strategy",
+    "Competitor Mentions": "competitor_mentions",
+    "Leadership Information": "leadership_info",
+    "Product/Strategy Summary": "product_strategy"
+}
+selected_sections = st.multiselect(
+    "Sections",
+    options=list(section_options.keys()),
+    default=list(section_options.keys()),
+    help="Choose which sections to include in the generated insights."
+)
 
 
 def extract_text_from_file(uploaded_file):
@@ -74,70 +90,107 @@ def extract_text_from_file(uploaded_file):
     else:
         return "[Unsupported file type]"
 
-def build_prompt():
-    doc_text = extract_text_from_file(uploaded_file)
-    prompt = f"""
-You are a professional sales insights assistant. Using the information below, generate a concise, well-structured one-page summary for a sales representative preparing for a client meeting. Use clear section headings and bullet points where appropriate. Only use information relevant to the sales context.
 
----
+# Multi-agent prompt builder for each section
+def build_section_prompt(section_key, doc_text, manual_leaders=None):
+    base = f"""
 Product Name: {product_name}
 Company URL: {company_url}
 Product Category: {product_category}
 Competitors: {competitors}
 Value Proposition: {value_proposition}
 Target Customer: {target_customer}
----
-
 Product Overview Document Extract (if provided):
 {doc_text}
----
-
-Your output should include the following sections:
-
-1. **Company Strategy**
-   - Summarize the company's activities and direction in the relevant industry.
-   - Reference any public statements, press releases, or articles by key executives (e.g., Chief Data Officer, Chief Compliance Officer).
-   - Mention relevant job postings or technology stack indicators if available.
-
-2. **Competitor Mentions**
-   - Note any public information about the listed competitors and their relationship to the target company.
-
-3. **Leadership Information**
-   - List key leaders at the prospect company, especially those quoted in recent press releases or articles.
-
-4. **Product/Strategy Summary**
-   - For public companies, include insights from annual reports or other relevant documents.
-
-5. **Article & Source Links**
-   - Provide links to any referenced articles, press releases, or sources.
-
-Format the output as a clean, readable one-pager. Be concise, factual, and actionable for a sales representative.
 """
-    return prompt
+    if manual_leaders and section_key == "leadership_info":
+        base += f"\nKnown Company Leaders (user provided):\n{manual_leaders}\n"
+    if section_key == "company_strategy":
+        return (
+            "You are a professional sales insights assistant. "
+            "Summarize the company's activities and direction in the relevant industry. "
+            "Reference any public statements, press releases, or articles by key executives. "
+            "Mention relevant job postings or technology stack indicators if available.\n" + base
+        )
+    elif section_key == "competitor_mentions":
+        return (
+            "You are a professional sales insights assistant. "
+            "Note any public information about the listed competitors and their relationship to the target company.\n" + base
+        )
+    elif section_key == "leadership_info":
+        return (
+            "You are a professional sales insights assistant. "
+            "List key leaders at the prospect company, especially those quoted in recent press releases or articles.\n" + base
+        )
+    elif section_key == "product_strategy":
+        return (
+            "You are a professional sales insights assistant. "
+            "For public companies, include insights from annual reports or other relevant documents.\n" + base
+        )
+    else:
+        return base
 
 if st.button("Generate Insights"):
     if not openai_api_key:
         st.error("OpenAI API key not found. Please set it in your .env file.")
     elif not product_name or not company_url:
         st.warning("Please fill in at least Product Name and Company URL.")
+    elif not selected_sections:
+        st.warning("Please select at least one section to include in the output.")
     else:
-        with st.spinner("Generating insights with GPT..."):
+        with st.spinner("Generating insights with GPT (multi-agent)..."):
             try:
                 client = openai.OpenAI(api_key=openai_api_key)
-                response = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": "You are a helpful sales assistant agent."},
-                        {"role": "user", "content": build_prompt()}
-                    ],
-                    max_tokens=800,
-                    temperature=0.7
-                )
+                doc_text = extract_text_from_file(uploaded_file)
+                # Multi-agent: run LLM for each selected section
+                sections = [(title, section_options[title]) for title in selected_sections]
+                results = {}
+                for title, key in sections:
+                    prompt = build_section_prompt(key, doc_text, manual_leaders)
+                    response = client.chat.completions.create(
+                        model="gpt-3.5-turbo",
+                        messages=[
+                            {"role": "system", "content": "You are a helpful sales assistant agent."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        max_tokens=500,
+                        temperature=0.7
+                    )
+                    results[title] = response.choices[0].message.content.strip()
                 st.success("Insights generated!")
-                # Render output with better formatting
                 st.markdown("---")
                 st.markdown("<h3>Sales Account Insights</h3>", unsafe_allow_html=True)
-                st.markdown(response.choices[0].message.content, unsafe_allow_html=True)
+                # Section summaries/tooltips
+                section_summaries = {
+                    "Company Strategy": "Summary of the company's activities, direction, and public statements in the relevant industry.",
+                    "Competitor Mentions": "Mentions and analysis of competitors relevant to the target company.",
+                    "Leadership Information": "Key leaders at the prospect company, especially those quoted in recent press releases or articles.",
+                    "Product/Strategy Summary": "Insights from annual reports or other relevant documents about the company's product or strategy."
+                }
+                for title, _ in sections:
+                    st.markdown(f"### {title}")
+                    if title in section_summaries:
+                        st.caption(section_summaries[title])
+                    st.markdown(results[title], unsafe_allow_html=True)
+                # Data Visualization: Competitor Mentions Bar Chart
+                import matplotlib.pyplot as plt
+                import pandas as pd
+                if "Competitor Mentions" in results and competitors.strip():
+                    competitor_list = [c.strip() for c in competitors.splitlines() if c.strip()]
+                    competitor_counts = {}
+                    competitor_text = results["Competitor Mentions"].lower()
+                    for comp in competitor_list:
+                        count = competitor_text.count(comp.lower())
+                        competitor_counts[comp] = count
+                    if competitor_counts:
+                        st.markdown("#### Competitor Mention Frequency (in Insights)")
+                        df = pd.DataFrame({"Competitor": list(competitor_counts.keys()), "Mentions": list(competitor_counts.values())})
+                        fig, ax = plt.subplots()
+                        df.plot(kind="bar", x="Competitor", y="Mentions", legend=False, ax=ax, color="#1f77b4")
+                        ax.set_ylabel("Mentions")
+                        ax.set_xlabel("")
+                        ax.set_title("")
+                        st.pyplot(fig)
                 st.markdown("---")
             except openai.APIStatusError as api_err:
                 if api_err.status_code == 429:
